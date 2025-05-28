@@ -32,6 +32,39 @@ def get_estimated_count(cur):
     return int(cur.fetchone()[0])
 
 
+
+# ...existing code...
+
+import hashlib
+
+import decimal
+
+def convert_decimal(obj):
+    if isinstance(obj, list):
+        return [convert_decimal(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, decimal.Decimal):
+        return float(obj)
+    else:
+        return obj
+
+import decimal
+import datetime
+
+def convert_decimal(obj):
+    if isinstance(obj, list):
+        return [convert_decimal(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, decimal.Decimal):
+        return float(obj)
+    elif isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+    else:
+        return obj
+# ...existing code...
+
 @app.get("/attendance")
 def get_attendance(
     department: Optional[str] = "",
@@ -42,6 +75,14 @@ def get_attendance(
     page: Union[int, str] = 1,
     page_size: int = 20
 ):
+    # Create a unique cache key based on filters and pagination
+    cache_key = f"attendance:{department}:{gender}:{maxDistance}:{date}:{attendance_status}:{page}:{page_size}"
+    cache_key = hashlib.md5(cache_key.encode()).hexdigest()
+
+    cached = redis_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -68,30 +109,23 @@ def get_attendance(
     if filters:
         base_query += " AND " + " AND ".join(filters)
 
-    # Determine total records
-    if page == "last":
-        total_records = get_estimated_count(cur)
-        page = math.ceil(total_records / page_size)
-    else:
-        cur.execute(f"SELECT COUNT(*) {base_query}", params)
-        total_records = cur.fetchone()[0]
-        page = int(page)
+    cur.execute(f"SELECT COUNT(*) {base_query}", params)
+    total_records = cur.fetchone()[0]
 
-    # Data query
     data_query = f"""
         SELECT emp_id, emp_name, gender, dept_name, distance_from_office, punch_date, attendance_status, punch_in_time, punch_out_time
         {base_query}
         ORDER BY punch_date
         LIMIT %s OFFSET %s
     """
-    paginated_params = params + [page_size, (page - 1) * page_size]
+    paginated_params = params + [page_size, (int(page) - 1) * page_size]
     cur.execute(data_query, paginated_params)
     records = cur.fetchall()
 
     cur.close()
     conn.close()
 
-    return {
+    result = {
         "data": [
             dict(zip(
                 ["emp_id", "emp_name", "gender", "dept_name", "distance_from_office", "punch_date", "attendance_status", "punch_in_time", "punch_out_time"],
@@ -101,3 +135,89 @@ def get_attendance(
         "totalRecords": total_records,
         "currentPage": page 
     }
+
+    # Convert Decimal to float before caching
+    result = convert_decimal(result)
+
+    # Cache the result for 2 minutes (120 seconds)
+    redis_client.setex(cache_key, 120, json.dumps(result))
+
+    return result
+# ...existing code...
+
+
+# @app.get("/attendance")
+# def get_attendance(
+#     department: Optional[str] = "",
+#     gender: Optional[str] = "",
+#     maxDistance: Optional[float] = None,
+#     date: Optional[str] = "",
+#     attendance_status: Optional[str] = "",
+#     page: Union[int, str] = 1,
+#     page_size: int = 20
+# ):
+#     conn = get_db_connection()
+#     cur = conn.cursor()
+
+#     base_query = "FROM emp1 WHERE TRUE"
+#     filters = []
+#     params = []
+
+#     if department:
+#         filters.append("dept_name = %s")
+#         params.append(department)
+#     if gender:
+#         filters.append("gender = %s")
+#         params.append(gender)
+#     if maxDistance is not None:
+#         filters.append("distance_from_office <= %s")
+#         params.append(maxDistance)
+#     if date:
+#         filters.append("punch_date = %s")
+#         params.append(date)
+#     if attendance_status:
+#         filters.append("attendance_status = %s")
+#         params.append(attendance_status)
+
+#     if filters:
+#         base_query += " AND " + " AND ".join(filters)
+
+#     cur.execute(f"SELECT COUNT(*) {base_query}", params)
+#     total_records = cur.fetchone()[0]
+
+#     # Fix: move int(page) only after checking it's not "last"
+#     # if page == "Last":
+#     #     total_records = get_estimated_count(cur)
+#     #     page = math.ceil(total_records / page_size)
+#     # else:
+#     #     cur.execute(f"SELECT COUNT(*) {base_query}", params)
+#     #     total_records = cur.fetchone()[0]
+#     #     try:
+#     #         page = int(page)
+#     #     except ValueError:
+#     #         page = 1  # fallback in case of invalid value
+
+#     # Data query
+#     data_query = f"""
+#         SELECT emp_id, emp_name, gender, dept_name, distance_from_office, punch_date, attendance_status, punch_in_time, punch_out_time
+#         {base_query}
+#         ORDER BY punch_date
+#         LIMIT %s OFFSET %s
+#     """
+#     paginated_params = params + [page_size, (page - 1) * page_size]
+#     cur.execute(data_query, paginated_params)
+#     records = cur.fetchall()
+
+#     cur.close()
+#     conn.close()
+
+#     return {
+#         "data": [
+#             dict(zip(
+#                 ["emp_id", "emp_name", "gender", "dept_name", "distance_from_office", "punch_date", "attendance_status", "punch_in_time", "punch_out_time"],
+#                 row
+#             )) for row in records
+#         ],
+#         "totalRecords": total_records,
+#         "currentPage": page 
+#     }
